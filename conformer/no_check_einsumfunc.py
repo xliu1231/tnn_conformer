@@ -2,17 +2,14 @@
 import torch
 import torch.nn.functional as F
 
-# import the checkpoint API
-import torch.utils.checkpoint as checkpoint
+
 
 #from .parse_conv_einsum import _parse_conv_einsum_input
-from .parse_conv_einsum import _parse_conv_einsum_input
+from parse_conv_einsum import _parse_conv_einsum_input
 
 from collections import OrderedDict
 from collections.abc import Mapping
 
-from .opt_einsum import contract, contract_expression, contract_path, helpers
-from .opt_einsum.paths import linear_to_ssa, ssa_to_linear
 
 import math
 
@@ -139,6 +136,15 @@ def atomic_pad(tensor, padding):
         print("Error: atomic_circular_pad tensor order not implemented")
 
 
+
+# \todo it's actually easier to read if I change this to
+#       mikl_ijkl_to_mijl_bar_l
+#       which is the same as
+#       ijkl_jmkl_to_ijml_bar_l # is this right?
+#       because then the batch indices appear in the right order
+# \todo I should probably switch the order of the inputs to stick to convention
+# Supports padding_mode - 'max_zeros', 'max_circular', 'zeros', 'reflect', 'replicate' or 'circular'
+# If 'max_zeros' or 'max_circular' is chosen, then whatever is passed to padding will be ignored
 def ijkl_mikl_to_mijl_bar_l(kernel, input_tens, max_mode_size=None, \
                             padding_mode='zeros', padding=0, stride=1, dilation=1, bias=False):
     # this is supposed to compute the most general, up to reshaping / permuting,
@@ -168,26 +174,51 @@ def ijkl_mikl_to_mijl_bar_l(kernel, input_tens, max_mode_size=None, \
     out_channels = groups*kernel.size(1)
 
 
+    m = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels, \
+                        kernel_size=kernel_size, \
+                        stride=stride, padding=padding, padding_mode=padding_mode, \
+                        dilation=dilation, \
+                        groups=groups, bias=bias)
     kernel_flipped = torch.flip(kernel, [3])
+    m.weight.data = kernel_flipped.view(out_channels, in_channels//groups, kernel_size)
 
-    ins = input_tens.reshape(batch_size, in_channels, input_size)
-    filts = kernel_flipped.view(out_channels, in_channels//groups, kernel_size)
-    output = F.conv1d(ins, filts, padding=padding,stride=stride, bias=bias,dilation=dilation, groups=groups)
-
+    output = m(input_tens.reshape(batch_size, in_channels, input_size))
     out_shape = (batch_size, groups, out_channels//groups, conv_len//stride)
 
     # \todo Cutting the mode down only makes sense for a max padding
     #       or if they're passing the maximum expected size
-    return torch.reshape(output[:,:,:(conv_len//stride)], out_shape)
+    return torch.reshape(output.data[:,:,:(conv_len//stride)], out_shape)
 
 
 
 
+#I = 1
+#J = 1
+#K = 1
+#L_kernel = 7
+#L_input = 13
+#M = 1
+#
+#A = torch.ones(I, J, K, L_kernel)
+#B = torch.ones(M, I, K, L_input)
+#
+#
+#max_mode_size = None
+#stride = 1
+#dilation = 1
+##padding = max_zeros_padding_1d(L_kernel, L_input, \
+##                               max_mode_size=max_mode_size, \
+##                               stride=stride, dilation=dilation)
+#padding = max_circular_padding_1d(L_kernel, L_input)
+#
+#T = ijkl_mikl_to_mijl_bar_l(A, B, padding_mode='circular', padding=padding)
+#
+#print(str(T.size()))
 
 
 def ijklm_niklm_to_nijlm_bar_lm(kernel, input_tens, max_mode_sizes=None, \
                                padding_mode='zeros', \
-                               padding=0, stride=1, dilation=1, bias=False):
+                               padding=0, stride=1, dilation=1, bias=None):
 
     # This is supposed to compute the most general, up to reshaping / permuting,
     # convolutional einsum with 2 convolution indices which is computable by Conv2d alone.
@@ -202,19 +233,18 @@ def ijklm_niklm_to_nijlm_bar_lm(kernel, input_tens, max_mode_sizes=None, \
     in_channels = groups*kernel.size(2)
     out_channels = groups*kernel.size(1)
 
-
     kernel_flipped = torch.flip(kernel, [3,4])
     ins = input_tens.reshape(batch_size, in_channels, input_size[0], input_size[1])
     filts = kernel_flipped.view(out_channels, in_channels//groups, kernel_size[0], kernel_size[1])
     
     output = F.conv2d(ins, filts, padding=padding,stride=stride, bias=bias,dilation=dilation, groups=groups)
     
-    
+
     try:
         stride[0]
     except TypeError:
         stride = [stride]*2
-    
+
     out_shape = (batch_size, groups, out_channels//groups, max_h//stride[0], max_w//stride[1])
     final_out = torch.reshape(output[:,:,:(max_h//stride[0]),:(max_w//stride[1])], out_shape)
     return final_out
@@ -241,25 +271,20 @@ def ijklmn_oiklmn_to_oijlmn_bar_lmn(kernel, input_tens, max_mode_sizes=0, \
 
 
     m = torch.nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, \
-                        stride=stride, padding=padding, padding_mode=padding_mode, dilation=dilation, groups=groups, bias=True)
+                        stride=stride, padding=padding, padding_mode=padding_mode, dilation=dilation, groups=groups, bias=bias)
 
     kernel_flipped = torch.flip(kernel, [3,4,5])
-    
-    
-    ins = input_tens.reshape(batch_size, in_channels, input_size[0], input_size[1], input_size[2])
-    filts = kernel_flipped.view(out_channels, in_channels//groups, kernel_size[0], kernel_size[1], kernel_size[2])
-    
-    output = F.conv3d(ins, filts, padding=padding,stride=stride, bias=bias,dilation=dilation, groups=groups)
-    
-    
+    m.weight.data = kernel_flipped.view(out_channels, in_channels//groups, kernel_size[0], kernel_size[1], kernel_size[2])
+
+    output = m(input_tens.reshape(batch_size, in_channels, input_size[0], input_size[1], input_size[2]))
+
     try:
         stride[0]
     except TypeError:
         stride = [stride]*3
-    
-    out_shape = (batch_size, groups, out_channels//groups, max_d//stride[0], max_h//stride[1], max_w//stride[2])
 
-    return torch.reshape(output[:,:,:(max_d//stride[0]),:(max_h//stride[1]),:(max_w//stride[2])], out_shape)
+    out_shape = (batch_size, groups, out_channels//groups, max_d//stride[0], max_h//stride[1], max_w//stride[2])
+    return torch.reshape(output.data[:,:,:(max_d//stride[0]),:(max_h//stride[1]),:(max_w//stride[2])], out_shape)
 
 
 
@@ -269,7 +294,7 @@ def ijklmn_oiklmn_to_oijlmn_bar_lmn(kernel, input_tens, max_mode_sizes=0, \
 #
 def convolution_atomic_operation(kernel, input_tens, num_convolutions, max_mode_sizes, \
                                  padding_mode='max_zeros', padding=0, stride=1, dilation=1, \
-                                 bias=True):
+                                 bias=False):
     # This operation expects the inputs input_tens and kernel to be shaped/permuted according to
     # the "atomic forms" given by the following functions
     # note the convolution indices always appear at the end
@@ -582,10 +607,10 @@ def conv_einsum_pair(*operands, max_mode_sizes=None, padding_mode='max_zeros', p
     # using Pytorch's contraction-only einsum
     if len(convolution_subscript) == 0:
         standard_einsum_str = input_subscripts0 + "," + input_subscripts1 + "->" + output_subscript
-        def custom(A,B):
-            return contract(standard_einsum_str, A, B)
-        return checkpoint(custom, operands[0], operands[1])
-    #return contract(standard_einsum_str, operands[0], operands[1])
+#        def custom(A,B):
+#            return contract(standard_einsum_str, A, B)
+#        return checkpoint(custom, operands[0], operands[1])
+        return torch.einsum(standard_einsum_str, operands[0], operands[1])
 
 
     # We evaluate all indices which don't appear as outputs and appear in only one of the two tensors
@@ -604,11 +629,11 @@ def conv_einsum_pair(*operands, max_mode_sizes=None, padding_mode='max_zeros', p
 
 
     if(len(non_outputs_appear_once0) > 0):
-        summed0_tensor = contract(appear_once0_einsum_str, operands[0])
+        summed0_tensor = torch.einsum(appear_once0_einsum_str, operands[0])
     else:
         summed0_tensor = operands[0]
     if(len(non_outputs_appear_once1) > 0):
-        summed1_tensor = contract(appear_once1_einsum_str, operands[1])
+        summed1_tensor = torch.einsum(appear_once1_einsum_str, operands[1])
     else:
         summed1_tensor = operands[1] # \todo is this if else block actually saving any computation?
 
@@ -696,10 +721,10 @@ def conv_einsum_pair(*operands, max_mode_sizes=None, padding_mode='max_zeros', p
 
     # \todo I think the atomic call to ConvXd can actually do this step, which would probably be faster
     contract_convolutions_str = output_subscript_conv_appended + "->" + output_subscript
-    def custom(A):
-        return contract(contract_convolutions_str,A)
-    return checkpoint.checkpoint(custom,reshaped_out)
-#return contract(contract_convolutions_str,reshaped_out)
+#    def custom(A):
+#        return contract(contract_convolutions_str,A)
+#    return checkpoint.checkpoint(custom,reshaped_out)
+    return torch.einsum(contract_convolutions_str,reshaped_out)
 
 
 
@@ -762,7 +787,7 @@ def conv_einsum(*variadic_operands, padding_mode='max_zeros', padding=0, \
     # approximately equivalent performance with einsum in all applicable cases
     ###
     if(len(convolution_subscript) == 0):
-        return contract(*variadic_operands)
+        return torch.einsum(*variadic_operands)
 
     if(len(input_subscripts) <= 1):
         # 1-way convolution is really a contraction operation (though this may not be
@@ -771,7 +796,7 @@ def conv_einsum(*variadic_operands, padding_mode='max_zeros', padding=0, \
         def custom(inputs):
             return contract(','.join(input_subscripts) + "->" + output_subscript, inputs)
 #        return checkpoint.checkpoint(contract, inputs)
-        return contract(','.join(input_subscripts) + "->" + output_subscript, inputs)
+        return torch.einsum(','.join(input_subscripts) + "->" + output_subscript, inputs)
 
     ###
     # Binary case

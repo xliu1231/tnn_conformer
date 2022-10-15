@@ -19,7 +19,7 @@ from typing import Tuple
 
 from .feed_forward import FeedForwardModule
 from .attention import MultiHeadedSelfAttentionModule
-from .convolution import (
+from .tensor_layers import (
     ConformerConvModule,
     Conv2dSubampling,
 )

@@ -168,13 +168,14 @@ class Conv2dSubampling(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super(Conv2dSubampling, self).__init__()
         self.sequential = nn.Sequential(
-            nn.CP_Conv2d(in_channels, out_channels, kernel_size=3, stride=2),
+            CP_Conv2d(in_channels, out_channels, kernel_size=3, stride=2),
             nn.ReLU(),
-            nn.CP_Conv2d(out_channels, out_channels, kernel_size=3, stride=2),
+            CP_Conv2d(out_channels, out_channels, kernel_size=3, stride=2),
             nn.ReLU(),
         )
 
     def forward(self, inputs: Tensor, input_lengths: Tensor) -> Tuple[Tensor, Tensor]:
+        print(inputs.unsqueeze(1).shape)
         outputs = self.sequential(inputs.unsqueeze(1))
         batch_size, channels, subsampled_lengths, sumsampled_dim = outputs.size()
 

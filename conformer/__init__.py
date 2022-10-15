@@ -13,3 +13,4 @@
 # limitations under the License.
 
 from .model import Conformer
+from .torch_conv_einsumfunc import *
